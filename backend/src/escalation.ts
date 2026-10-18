@@ -1,3 +1,9 @@
+import path from "node:path";
+import { config as loadEnv } from "dotenv";
+
+loadEnv({ path: path.resolve(process.cwd(), "../.env") });
+loadEnv();
+
 import type { Alert, Medication, VitalsPacket } from "./types.js";
 import {
   recordAuditEvent,
@@ -35,6 +41,8 @@ export interface EscalationContext {
   secondaryCaregiver?: CaregiverContact;
 }
 
+export type EscalationState = "PENDING_STEP1" | "STEP1_SENT" | "PENDING_STEP2" | "STEP2_SENT" | "ACKNOWLEDGED" | "CANCELLED";
+
 export interface ActiveEscalation {
   alertId: string;
   patientId: string;
@@ -43,7 +51,7 @@ export interface ActiveEscalation {
   context: EscalationContext;
   step1Timer: NodeJS.Timeout | null;
   step2Timer: NodeJS.Timeout | null;
-  state: "PENDING_STEP1" | "STEP1_SENT" | "PENDING_STEP2" | "STEP2_SENT" | "ACKNOWLEDGED" | "CANCELLED";
+  state: EscalationState;
   createdAt: number;
 }
 
@@ -60,19 +68,110 @@ export interface EscalationResult {
   timer_ms?: number;
 }
 
+export function getEscalationConfig(overrides?: Partial<EscalationConfig>): EscalationConfig {
+  const step1Delay =
+    overrides?.step1DelayMs !== undefined
+      ? overrides.step1DelayMs
+      : process.env.STEP_1_DELAY_MS !== undefined
+      ? Number(process.env.STEP_1_DELAY_MS)
+      : (DEFAULT_CONFIG as any)._step1 !== undefined
+      ? (DEFAULT_CONFIG as any)._step1
+      : 0; // Default 0 for instant emergency alerts
+
+  const step2Delay =
+    overrides?.step2DelayMs !== undefined
+      ? overrides.step2DelayMs
+      : process.env.STEP_2_DELAY_MS !== undefined
+      ? Number(process.env.STEP_2_DELAY_MS)
+      : (DEFAULT_CONFIG as any)._step2 !== undefined
+      ? (DEFAULT_CONFIG as any)._step2
+      : 60_000;
+
+  const rateLimitWindow =
+    overrides?.rateLimitWindowMs !== undefined
+      ? overrides.rateLimitWindowMs
+      : process.env.RATE_LIMIT_WINDOW_MS !== undefined
+      ? Number(process.env.RATE_LIMIT_WINDOW_MS)
+      : (DEFAULT_CONFIG as any)._rateLimit !== undefined
+      ? (DEFAULT_CONFIG as any)._rateLimit
+      : 5_000;
+
+  const primaryPhone =
+    overrides?.primaryCaregiver?.phone ||
+    process.env.PRIMARY_CAREGIVER_PHONE ||
+    DEFAULT_CONFIG.primaryCaregiver?.phone ||
+    "+918076860402";
+
+  const primaryName =
+    overrides?.primaryCaregiver?.name ||
+    process.env.PRIMARY_CAREGIVER_NAME ||
+    DEFAULT_CONFIG.primaryCaregiver?.name ||
+    "Primary Caregiver";
+
+  const secondaryPhone =
+    overrides?.secondaryCaregiver?.phone ||
+    process.env.SECONDARY_CAREGIVER_PHONE ||
+    DEFAULT_CONFIG.secondaryCaregiver?.phone ||
+    "+15559876543";
+
+  const secondaryName =
+    overrides?.secondaryCaregiver?.name ||
+    process.env.SECONDARY_CAREGIVER_NAME ||
+    DEFAULT_CONFIG.secondaryCaregiver?.name ||
+    "Secondary Caregiver";
+
+  return {
+    step1DelayMs: step1Delay,
+    step2DelayMs: step2Delay,
+    rateLimitWindowMs: rateLimitWindow,
+    primaryCaregiver: { name: primaryName, phone: primaryPhone },
+    secondaryCaregiver: { name: secondaryName, phone: secondaryPhone },
+    dashboardBaseUrl: overrides?.dashboardBaseUrl || process.env.DASHBOARD_URL || "http://localhost:5173",
+  };
+}
+
 export const DEFAULT_CONFIG: EscalationConfig = {
-  step1DelayMs: 60_000, // 60 seconds
-  step2DelayMs: 60_000, // another 60 seconds
-  rateLimitWindowMs: 5 * 60_000, // 5 minutes
-  primaryCaregiver: {
-    name: process.env.PRIMARY_CAREGIVER_NAME || "Primary Caregiver",
-    phone: process.env.PRIMARY_CAREGIVER_PHONE || "+15551234567",
+  get step1DelayMs() {
+    return (this as any)._step1 ?? (process.env.STEP_1_DELAY_MS !== undefined ? Number(process.env.STEP_1_DELAY_MS) : 0);
   },
-  secondaryCaregiver: {
-    name: process.env.SECONDARY_CAREGIVER_NAME || "Secondary Contact",
-    phone: process.env.SECONDARY_CAREGIVER_PHONE || "+15559876543",
+  set step1DelayMs(val: number) {
+    (this as any)._step1 = val;
   },
-  dashboardBaseUrl: process.env.DASHBOARD_URL || "http://localhost:5173",
+  get step2DelayMs() {
+    return (this as any)._step2 ?? (process.env.STEP_2_DELAY_MS !== undefined ? Number(process.env.STEP_2_DELAY_MS) : 60_000);
+  },
+  set step2DelayMs(val: number) {
+    (this as any)._step2 = val;
+  },
+  get rateLimitWindowMs() {
+    return (this as any)._rateLimit ?? (process.env.RATE_LIMIT_WINDOW_MS !== undefined ? Number(process.env.RATE_LIMIT_WINDOW_MS) : 5_000);
+  },
+  set rateLimitWindowMs(val: number) {
+    (this as any)._rateLimit = val;
+  },
+  get primaryCaregiver(): CaregiverContact {
+    return {
+      name: (this as any)._pName || process.env.PRIMARY_CAREGIVER_NAME || "Primary Caregiver",
+      phone: (this as any)._pPhone || process.env.PRIMARY_CAREGIVER_PHONE || "+918076860402",
+    };
+  },
+  set primaryCaregiver(val: CaregiverContact) {
+    (this as any)._pName = val.name;
+    (this as any)._pPhone = val.phone;
+  },
+  get secondaryCaregiver(): CaregiverContact {
+    return {
+      name: (this as any)._sName || process.env.SECONDARY_CAREGIVER_NAME || "Secondary Contact",
+      phone: (this as any)._sPhone || process.env.SECONDARY_CAREGIVER_PHONE || "+15559876543",
+    };
+  },
+  set secondaryCaregiver(val: CaregiverContact) {
+    (this as any)._sName = val.name;
+    (this as any)._sPhone = val.phone;
+  },
+  get dashboardBaseUrl() {
+    return process.env.DASHBOARD_URL || "http://localhost:5173";
+  },
 };
 
 // In-memory registry of active escalations keyed by alert_id
@@ -95,7 +194,12 @@ export function formatEscalationMessage(
   context: EscalationContext = {},
   dashboardBaseUrl: string = DEFAULT_CONFIG.dashboardBaseUrl,
 ): string {
-  const patientName = context.patientName || `Patient ${alert.patient_id}`;
+  let patientName = context.patientName;
+  if (!patientName) {
+    if (alert.patient_id === "pt_001") patientName = "Eleanor Vance";
+    else if (alert.patient_id === "pt_002") patientName = "Robert Chen";
+    else patientName = `Patient ${alert.patient_id}`;
+  }
   const time = alert.timestamp || new Date().toISOString();
   const summary = alert.message || "Critical alert triggered.";
 
@@ -127,7 +231,12 @@ export function formatVoiceMessage(
   alert: Alert,
   context: EscalationContext = {},
 ): string {
-  const patientName = context.patientName || `Patient ${alert.patient_id}`;
+  let patientName = context.patientName;
+  if (!patientName) {
+    if (alert.patient_id === "pt_001") patientName = "Eleanor Vance";
+    else if (alert.patient_id === "pt_002") patientName = "Robert Chen";
+    else patientName = `Patient ${alert.patient_id}`;
+  }
   let vitalsSpeech = "";
   if (context.vitals) {
     vitalsSpeech = `Heart rate is ${context.vitals.heart_rate} beats per minute, oxygen saturation is ${context.vitals.spo2} percent, blood pressure is ${context.vitals.systolic_bp} over ${context.vitals.diastolic_bp}.`;
@@ -137,13 +246,16 @@ export function formatVoiceMessage(
 
 /**
  * Checks if a notification is rate-limited:
- * Max 1 notification per patient per alert type per 5 minutes.
+ * Max 1 notification per patient per alert type per rateLimitWindowMs.
  */
 export function isRateLimited(
   patientId: string,
   alertType: string,
   windowMs: number = DEFAULT_CONFIG.rateLimitWindowMs,
 ): boolean {
+  if (process.env.DISABLE_RATE_LIMIT === "true" || windowMs <= 0) {
+    return false;
+  }
   const key = `${patientId}:${alertType}`;
   const lastTime = lastNotificationMap.get(key);
   if (!lastTime) {
@@ -183,16 +295,13 @@ export async function handleAlertEscalation(
     };
   }
 
-  const config: EscalationConfig = {
-    ...DEFAULT_CONFIG,
-    ...overrides,
-  };
+  const config: EscalationConfig = getEscalationConfig(overrides);
 
   const alertId = alert.event_id;
   const patientId = alert.patient_id;
   const alertType = alert.type;
 
-  // Check rate limiting: max 1 notification per patient per alert type per 5 mins
+  // Check rate limiting: max 1 notification per patient per alert type per rateLimitWindowMs
   if (isRateLimited(patientId, alertType, config.rateLimitWindowMs)) {
     const reason = `Rate limit exceeded: max 1 notification per patient per alert type per ${Math.round(
       config.rateLimitWindowMs / 60000,
@@ -233,12 +342,6 @@ export async function handleAlertEscalation(
     },
   });
 
-  console.log(
-    `[Escalation] RED alert ${alertId} detected for patient ${patientId}. Starting ${
-      config.step1DelayMs / 1000
-    }s timer.`,
-  );
-
   const escalation: ActiveEscalation = {
     alertId,
     patientId,
@@ -251,12 +354,23 @@ export async function handleAlertEscalation(
     createdAt: Date.now(),
   };
 
-  // Start 60-second timer per RED alert
-  escalation.step1Timer = setTimeout(async () => {
-    await executeStep1(escalation, config);
-  }, config.step1DelayMs);
-
   activeEscalations.set(alertId, escalation);
+
+  if (config.step1DelayMs <= 0) {
+    console.log(`[Escalation] RED alert ${alertId} detected for patient ${patientId}. Executing Step 1 immediately.`);
+    executeStep1(escalation, config).catch((err) =>
+      console.error("[Escalation] Error in executeStep1:", err),
+    );
+  } else {
+    console.log(
+      `[Escalation] RED alert ${alertId} detected for patient ${patientId}. Starting ${
+        config.step1DelayMs / 1000
+      }s timer for Step 1.`,
+    );
+    escalation.step1Timer = setTimeout(async () => {
+      await executeStep1(escalation, config);
+    }, config.step1DelayMs);
+  }
 
   await recordAuditEvent({
     alert_id: alertId,
@@ -299,7 +413,22 @@ async function executeStep1(
   escalation.state = "STEP1_SENT";
   markNotificationSent(patientId, alertType);
 
-  const primary = context.primaryCaregiver || config.primaryCaregiver;
+  let primaryPhone = context.primaryCaregiver?.phone;
+  if (!primaryPhone) {
+    primaryPhone =
+      config.primaryCaregiver?.phone ||
+      process.env.PRIMARY_CAREGIVER_PHONE ||
+      "+918076860402";
+  }
+  if (primaryPhone === "+15551234567" && process.env.PRIMARY_CAREGIVER_PHONE) {
+    primaryPhone = process.env.PRIMARY_CAREGIVER_PHONE;
+  }
+
+  const primary: CaregiverContact = {
+    name: context.primaryCaregiver?.name || config.primaryCaregiver.name || "Primary Caregiver",
+    phone: primaryPhone,
+  };
+
   const messageBody = formatEscalationMessage(alert, context, config.dashboardBaseUrl);
   const voiceBody = formatVoiceMessage(alert, context);
 
@@ -382,8 +511,6 @@ async function executeStep1(
     whatsappResult = await sendTwilioWhatsApp({
       to: primary.phone,
       body: messageBody,
-      contentSid: process.env.TWILIO_CONTENT_SID,
-      contentVariables: { "1": "Critical Alert", "2": context.patientName || `Patient ${patientId}` },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -418,6 +545,12 @@ async function executeStep1(
   });
 
   // Step 2, after another 60 seconds, notifies the secondary contact
+  const currentState = escalation.state as EscalationState;
+  if (currentState === "ACKNOWLEDGED" || currentState === "CANCELLED" || !activeEscalations.has(alertId)) {
+    console.log(`[Escalation] Alert ${alertId} was cancelled/acknowledged during Step 1. Skipping Step 2.`);
+    return;
+  }
+
   escalation.state = "PENDING_STEP2";
   console.log(
     `[Escalation] Alert ${alertId}: Step 1 finished. Starting ${
@@ -446,9 +579,21 @@ async function executeStep2(
   }
 
   escalation.state = "STEP2_SENT";
-  const secondary = context.secondaryCaregiver || config.secondaryCaregiver;
-  const messageBody = formatEscalationMessage(alert, context, config.dashboardBaseUrl);
-  const voiceBody = formatVoiceMessage(alert, context);
+  let secondaryPhone = context.secondaryCaregiver?.phone;
+  if (!secondaryPhone || secondaryPhone === "+15559876543") {
+    secondaryPhone =
+      config.secondaryCaregiver?.phone ||
+      process.env.SECONDARY_CAREGIVER_PHONE ||
+      process.env.PRIMARY_CAREGIVER_PHONE ||
+      "+918076860402";
+  }
+  const secondary: CaregiverContact = {
+    name: context.secondaryCaregiver?.name || config.secondaryCaregiver?.name || "Backup Emergency Contact",
+    phone: secondaryPhone,
+  };
+  const baseMessage = formatEscalationMessage(alert, context, config.dashboardBaseUrl);
+  const messageBody = `🚨 URGENT ESCALATION (UNACKNOWLEDGED AFTER 60s) 🚨\nPrimary caregiver did not acknowledge alert within 60s!\n\n${baseMessage}`;
+  const voiceBody = `Emergency escalation. Alert unacknowledged after sixty seconds. ${formatVoiceMessage(alert, context)}`;
 
   console.log(
     `[Escalation] Executing Step 2 for alert ${alertId} (Secondary: ${secondary.name} at ${secondary.phone})...`,
@@ -500,8 +645,6 @@ async function executeStep2(
     whatsappResult = await sendTwilioWhatsApp({
       to: secondary.phone,
       body: messageBody,
-      contentSid: process.env.TWILIO_CONTENT_SID,
-      contentVariables: { "1": "Escalated Alert", "2": context.patientName || `Patient ${patientId}` },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -620,8 +763,15 @@ export function getActiveEscalation(alertId: string): ActiveEscalation | undefin
 
 export function clearAllActiveEscalations(): void {
   for (const esc of activeEscalations.values()) {
-    if (esc.step1Timer) clearTimeout(esc.step1Timer);
-    if (esc.step2Timer) clearTimeout(esc.step2Timer);
+    esc.state = "CANCELLED";
+    if (esc.step1Timer) {
+      clearTimeout(esc.step1Timer);
+      esc.step1Timer = null;
+    }
+    if (esc.step2Timer) {
+      clearTimeout(esc.step2Timer);
+      esc.step2Timer = null;
+    }
   }
   activeEscalations.clear();
 }

@@ -245,6 +245,8 @@ export class FusionEngine {
         timestamp: new Date().toISOString(),
         severity: "GREEN",
         type: "COMPOUND",
+        triage_level: "P4",
+        triage_category: "COMPOUND",
         message: `Monitored medication interaction (${topInteraction.matched_drugs.join(" + ")}). Patient vitals are within normal range.`,
         instructions: [
           "Continue routine observation.",
@@ -292,6 +294,8 @@ export class FusionEngine {
       timestamp: new Date().toISOString(),
       severity: "GREEN",
       type: "VITALS",
+      triage_level: "P4",
+      triage_category: "VITALS",
       message: "Vitals within expected range.",
       instructions: ["Continue routine monitoring."],
       contributing_signals: [],
@@ -397,6 +401,8 @@ export class FusionEngine {
       timestamp: new Date().toISOString(),
       severity: "RED", // High priority compound alert
       type: "COMPOUND",
+      triage_level: "P1",
+      triage_category: "COMPOUND",
       message,
       instructions: [
         "Show this medication list to the emergency team.",
@@ -460,6 +466,8 @@ export class FusionEngine {
       timestamp: new Date().toISOString(),
       severity: deterioration.severity,
       type: "VITALS",
+      triage_level: isRed ? "P1" : "P2",
+      triage_category: "VITALS",
       message,
       instructions,
       contributing_signals: deterioration.contributing_signals,

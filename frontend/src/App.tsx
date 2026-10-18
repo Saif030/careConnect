@@ -109,7 +109,48 @@ export default function App() {
 
   // Handle incoming alert
   const handleAlertPacket = useCallback((alert: Alert) => {
-    setAlerts((prev) => [alert, ...prev.filter((a) => a.event_id !== alert.event_id)].slice(0, 30));
+    setAlerts((prev) => {
+      // 1. Check by exact event_id
+      const idIdx = prev.findIndex((a) => a.event_id === alert.event_id);
+      if (idIdx >= 0) {
+        const next = [...prev];
+        next[idIdx] = {
+          ...next[idIdx],
+          ...alert,
+          // Preserve local resolution and acknowledgment states
+          resolved: next[idIdx].resolved || alert.resolved,
+          acknowledged: next[idIdx].acknowledged || alert.acknowledged,
+          resolved_at: next[idIdx].resolved_at || alert.resolved_at,
+          resolved_by: next[idIdx].resolved_by || alert.resolved_by,
+          resolution_action: next[idIdx].resolution_action || alert.resolution_action,
+          resolution_note: next[idIdx].resolution_note || alert.resolution_note,
+        };
+        return next;
+      }
+
+      // 2. Check for deduplication by patient_id + message
+      const msgIdx = prev.findIndex(
+        (a) => a.patient_id === alert.patient_id && a.message === alert.message
+      );
+      if (msgIdx >= 0) {
+        const existing = prev[msgIdx];
+        if (existing.resolved && (alert.severity === "GREEN" || alert.silent)) {
+          return prev;
+        }
+        const next = [...prev];
+        next[msgIdx] = {
+          ...next[msgIdx],
+          ...alert,
+          event_id: existing.event_id,
+          resolved: existing.resolved || alert.resolved,
+          acknowledged: existing.acknowledged || alert.acknowledged,
+        };
+        return next;
+      }
+
+      // 3. New incoming alert
+      return [alert, ...prev].slice(0, 40);
+    });
 
     if (alert.severity === "RED") {
       setCriticalAlert(alert);
@@ -156,6 +197,28 @@ export default function App() {
 
     socket.on("alert_updated", (updated: Alert) => {
       setAlerts((prev) => prev.map((a) => (a.event_id === updated.event_id ? updated : a)));
+    });
+
+    socket.on("alert:updated", (updated: Alert) => {
+      setAlerts((prev) => prev.map((a) => (a.event_id === updated.event_id ? updated : a)));
+    });
+
+    socket.on("alert:resolved", (payload: { event_id: string; resolved: boolean; resolved_at: string; resolved_by: string; resolution_action: string; resolution_note?: string }) => {
+      setAlerts((prev) =>
+        prev.map((a) =>
+          a.event_id === payload.event_id
+            ? {
+                ...a,
+                resolved: true,
+                resolved_at: payload.resolved_at,
+                resolved_by: payload.resolved_by,
+                resolution_action: payload.resolution_action,
+                resolution_note: payload.resolution_note,
+                acknowledged: true,
+              }
+            : a
+        )
+      );
     });
 
     socket.on("medications", (payload: { patient_id: string; medications: Medication[] }) => {
@@ -210,7 +273,7 @@ export default function App() {
       });
   };
 
-  // Evaluate packet locally as resilient fallback
+  // Evaluate packet locally as resilient fallback covering multiple clinical categories
   const evaluatePacketFallback = (packet: VitalsPacket): Alert => {
     const signals: string[] = [];
     if (packet.heart_rate < 50 || packet.heart_rate > 110) signals.push("heart_rate");
@@ -218,69 +281,208 @@ export default function App() {
     if (packet.systolic_bp < 90 || packet.systolic_bp > 160) signals.push("systolic_bp");
     if (packet.diastolic_bp < 50 || packet.diastolic_bp > 100) signals.push("diastolic_bp");
 
-    if (packet.systolic_bp < 85 && packet.diastolic_bp < 55) {
+    const now = packet.timestamp || new Date().toISOString();
+    const eventId = `evt_sim_${Date.now()}`;
+
+    // Inspect active patient medications for pharmacodynamic correlations
+    const medNames = medications.map((m) => (m.drug_name || m.generic_name || "").toLowerCase());
+    const hasAntihypertensives = medNames.some(
+      (m) =>
+        m.includes("lisinopril") ||
+        m.includes("amlodipine") ||
+        m.includes("losartan") ||
+        m.includes("ramipril") ||
+        m.includes("norvasc"),
+    );
+    const hasBetaBlockers = medNames.some(
+      (m) =>
+        m.includes("metoprolol") ||
+        m.includes("atenolol") ||
+        m.includes("carvedilol") ||
+        m.includes("propranolol"),
+    );
+
+    // 1. Critical Hypoxia / Acute Respiratory Distress (P1)
+    if (packet.spo2 < 90) {
       return {
-        event_id: `evt_sim_${Date.now()}`,
+        event_id: eventId,
         patient_id: packet.patient_id,
-        timestamp: packet.timestamp,
+        timestamp: now,
         severity: "RED",
-        type: "COMPOUND",
-        message: "Possible additive hypotensive effect with current medications and low blood pressure.",
+        type: "VITALS",
+        triage_level: "P1",
+        triage_category: "VITALS",
+        message: `Acute Hypoxemic Desaturation: SpO2 critically low at ${packet.spo2}%. Respiratory triage required.`,
         instructions: [
-          "Do not give the next dose until a clinician reviews.",
-          "Check blood pressure again in 10 minutes.",
-          "Place patient in supine position with legs elevated.",
+          "Initiate supplemental high-flow O2 via nasal cannula or mask immediately.",
+          "Place patient in upright high Fowler's position and clear airway.",
+          "Notify Attending Physician; prepare stat arterial blood gas analysis.",
         ],
-        contributing_signals: signals,
-        interaction: {
-          drugs: ["amlodipine", "lisinopril"],
-          mechanism: "additive vasodilation",
-          clinical_effect: "hypotension",
+        contributing_signals: ["spo2", ...(packet.heart_rate > 110 ? ["heart_rate"] : [])],
+        explanation: {
+          signals: ["spo2"],
+          duration: "Acute desaturation",
+          duration_seconds: 60,
+          thresholds: {
+            spo2: { value: packet.spo2, threshold: 92, condition: "low" },
+          },
+          matched_rule: "Respiratory Emergency: Peripheral SpO2 below 90% indicates severe hypoxemia.",
+          clinical_rationale: "Hypoxemic tissue perfusion deficit observed with secondary cardiac strain risk.",
+          recommendation: "Immediate oxygen titration and pulmonary auscultation.",
         },
       };
     }
 
-    if (signals.includes("spo2") || packet.heart_rate > 130 || packet.systolic_bp < 80) {
+    // 2. Severe Bradycardia with Drug-Vital Contraindication check (P1)
+    if (packet.heart_rate < 50) {
+      const isContraindicated = hasBetaBlockers;
       return {
-        event_id: `evt_sim_${Date.now()}`,
+        event_id: eventId,
         patient_id: packet.patient_id,
-        timestamp: packet.timestamp,
+        timestamp: now,
+        severity: "RED",
+        type: isContraindicated ? "COMPOUND" : "VITALS",
+        triage_level: "P1",
+        triage_category: isContraindicated ? "CONTRAINDICATION" : "VITALS",
+        message: isContraindicated
+          ? `Drug-Vital Contraindication: Severe Bradycardia (${packet.heart_rate} bpm) while active on Beta-Blocker therapy.`
+          : `Profound Bradycardia: Heart rate critically depressed at ${packet.heart_rate} bpm.`,
+        instructions: [
+          isContraindicated
+            ? "HOLD all scheduled beta-blocker and rate-limiting doses immediately."
+            : "Verify peripheral pulse volume and initiate continuous 12-lead ECG monitor.",
+          "Check patient responsiveness, mental clarity, and orthostatic symptoms.",
+          "Prepare bedside atropine 0.5mg IV if hemodynamically compromised.",
+        ],
+        contributing_signals: ["heart_rate", ...(packet.systolic_bp < 90 ? ["systolic_bp"] : [])],
+        interaction: isContraindicated
+          ? {
+              drugs: medications
+                .filter(
+                  (m) =>
+                    (m.drug_name || m.generic_name).toLowerCase().includes("metoprolol") ||
+                    (m.drug_name || m.generic_name).toLowerCase().includes("atenolol"),
+                )
+                .map((m) => m.drug_name),
+              mechanism: "Negative chronotropic blockade exacerbating severe sinus bradycardia",
+              clinical_effect: "Conduction block, cerebral hypoperfusion, syncope risk",
+              affected_vitals: ["heart_rate", "systolic_bp"],
+            }
+          : undefined,
+      };
+    }
+
+    // 3. Extreme Tachycardia (P1)
+    if (packet.heart_rate > 130) {
+      return {
+        event_id: eventId,
+        patient_id: packet.patient_id,
+        timestamp: now,
         severity: "RED",
         type: "VITALS",
-        message: "Critical vital sign deviation detected.",
+        triage_level: "P1",
+        triage_category: "VITALS",
+        message: `Extreme Tachycardia: Heart rate surging at ${packet.heart_rate} bpm. Hemodynamic strain.`,
         instructions: [
-          "Stay with the patient.",
-          "Recheck vitals immediately.",
-          "Escalate to a clinician.",
+          "Obtain immediate 12-lead ECG to differentiate sinus tachycardia from supraventricular arrhythmia.",
+          "Assess for underlying triggers: sepsis, hypovolemia, pulmonary embolism, or fever.",
+          "Notify provider for urgent bedside evaluation and rate control.",
         ],
-        contributing_signals: signals,
+        contributing_signals: ["heart_rate"],
       };
     }
 
+    // 4. Hypotensive Crisis / Compound Shock (P1)
+    if (packet.systolic_bp < 85 && packet.diastolic_bp < 55) {
+      const isCompound = hasAntihypertensives;
+      return {
+        event_id: eventId,
+        patient_id: packet.patient_id,
+        timestamp: now,
+        severity: "RED",
+        type: isCompound ? "COMPOUND" : "VITALS",
+        triage_level: "P1",
+        triage_category: isCompound ? "COMPOUND" : "VITALS",
+        message: isCompound
+          ? `Compound Hemodynamic Crash: Severe Hypotension (${packet.systolic_bp}/${packet.diastolic_bp} mmHg) with active vasodilatory regimen.`
+          : `Acute Hypotensive Shock: Blood pressure collapsed to ${packet.systolic_bp}/${packet.diastolic_bp} mmHg.`,
+        instructions: [
+          "Place patient in Trendelenburg / supine position with lower extremities elevated.",
+          isCompound
+            ? "HOLD next dose of all antihypertensive and vasodilator medications."
+            : "Initiate rapid crystalloid IV fluid bolus if clinically indicated.",
+          "Recheck automated non-invasive BP every 3 minutes.",
+        ],
+        contributing_signals: ["systolic_bp", "diastolic_bp"],
+        interaction: isCompound
+          ? {
+              drugs: medications
+                .filter(
+                  (m) =>
+                    (m.drug_name || m.generic_name).toLowerCase().includes("lisinopril") ||
+                    (m.drug_name || m.generic_name).toLowerCase().includes("amlodipine") ||
+                    (m.drug_name || m.generic_name).toLowerCase().includes("norvasc"),
+                )
+                .map((m) => m.drug_name),
+              mechanism: "Additive systemic vascular resistance reduction and arterial vasodilation",
+              clinical_effect: "Severe hypoperfusion, orthostatic syncope, circulatory collapse",
+              affected_vitals: ["systolic_bp", "diastolic_bp"],
+            }
+          : undefined,
+      };
+    }
+
+    // 5. Hypertensive Crisis (P1)
+    if (packet.systolic_bp > 180 || packet.diastolic_bp > 110) {
+      return {
+        event_id: eventId,
+        patient_id: packet.patient_id,
+        timestamp: now,
+        severity: "RED",
+        type: "VITALS",
+        triage_level: "P1",
+        triage_category: "VITALS",
+        message: `Hypertensive Emergency: Severe blood pressure elevation (${packet.systolic_bp}/${packet.diastolic_bp} mmHg). Risk of end-organ compromise.`,
+        instructions: [
+          "Assess immediately for end-organ signs: acute headache, visual disturbance, chest pain, or dyspnea.",
+          "Maintain calm resting environment and repeat manual blood pressure measurement.",
+          "Stat physician notification for cautious intravenous antihypertensive titration.",
+        ],
+        contributing_signals: ["systolic_bp", "diastolic_bp"],
+      };
+    }
+
+    // 6. Borderline / Warning Deviations (P2/P3)
     if (signals.length > 0) {
       return {
-        event_id: `evt_sim_${Date.now()}`,
+        event_id: eventId,
         patient_id: packet.patient_id,
-        timestamp: packet.timestamp,
+        timestamp: now,
         severity: "YELLOW",
         type: "VITALS",
-        message: "One or more vital signs are outside the resting range.",
+        triage_level: "P2",
+        triage_category: "VITALS",
+        message: `Borderline Vital Sign Deviation: ${signals.map((s) => s.replace("_", " ").toUpperCase()).join(", ")} outside resting threshold.`,
         instructions: [
-          "Have the patient rest for 5 minutes.",
-          "Recheck heart rate, SpO2, and blood pressure.",
+          "Have the patient rest in bed for 5-10 minutes.",
+          "Recheck heart rate, SpO2, and blood pressure to rule out movement artifact.",
+          "Document telemetry trend in nursing flow sheet.",
         ],
         contributing_signals: signals,
       };
     }
 
+    // 7. Stable Routine Baseline (P4)
     return {
-      event_id: `evt_sim_${Date.now()}`,
+      event_id: eventId,
       patient_id: packet.patient_id,
-      timestamp: packet.timestamp,
+      timestamp: now,
       severity: "GREEN",
       type: "VITALS",
-      message: "Vitals within expected range.",
-      instructions: ["Continue routine monitoring."],
+      triage_level: "P4",
+      triage_category: "VITALS",
+      message: "Vitals within expected physiological baseline.",
+      instructions: ["Continue scheduled routine telemetry monitoring."],
       contributing_signals: [],
     };
   };
@@ -414,6 +616,49 @@ export default function App() {
       "Emergency Protocol Activated",
       `Emergency takeover activated for ${alert.message}`,
       "critical",
+    );
+  };
+
+  const handleResolveAlert = async (
+    eventId: string,
+    resolution: { action: string; note: string; clinician: string }
+  ) => {
+    try {
+      await fetch(`/alerts/${eventId}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resolution),
+      });
+      await fetch(`/api/alerts/${eventId}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resolution),
+      }).catch(() => undefined);
+    } catch {
+      // offline fallback
+    }
+
+    const now = new Date().toISOString();
+    setAlerts((prev) =>
+      prev.map((a) =>
+        a.event_id === eventId
+          ? {
+              ...a,
+              resolved: true,
+              resolved_at: now,
+              resolved_by: resolution.clinician,
+              resolution_action: resolution.action,
+              resolution_note: resolution.note,
+              acknowledged: true,
+            }
+          : a
+      )
+    );
+
+    triggerToast(
+      "Alert Triage Resolved",
+      `${resolution.action} logged by ${resolution.clinician}`,
+      "info"
     );
   };
 
@@ -611,6 +856,7 @@ export default function App() {
                 onAcknowledgeAlert={handleAcknowledgeAlert}
                 onAlertFeedback={handleAlertFeedback}
                 onEscalateAlert={handleEscalateAlert}
+                onResolveAlert={handleResolveAlert}
               />
             </div>
           )}
@@ -621,6 +867,7 @@ export default function App() {
               onAcknowledgeAlert={handleAcknowledgeAlert}
               onAlertFeedback={handleAlertFeedback}
               onEscalateAlert={handleEscalateAlert}
+              onResolveAlert={handleResolveAlert}
             />
           )}
 

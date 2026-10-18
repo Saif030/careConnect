@@ -87,7 +87,7 @@ export function DemoController({
       </div>
 
       {/* Scenario Cards */}
-      <div className="mt-3.5 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-3.5 grid gap-2.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         {DEMO_SCENARIOS.map((scen) => {
           const isComp = scen.id === "compound";
           const borderStyle = isComp

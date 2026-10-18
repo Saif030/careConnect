@@ -70,5 +70,12 @@ export interface Alert {
   feedback_at?: string;
   silent?: boolean;
   dashboard_card_only?: boolean;
+  triage_category?: "VITALS" | "COMPOUND" | "DDI" | "CONTRAINDICATION" | "ANOMALY";
+  triage_level?: "P1" | "P2" | "P3" | "P4";
+  resolved?: boolean;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_note?: string;
+  resolution_action?: string;
 }
 

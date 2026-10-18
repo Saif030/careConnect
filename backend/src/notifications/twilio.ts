@@ -95,11 +95,15 @@ export async function sendTwilioSms(
   }
 
   try {
-    const message = await client.messages.create({ body, to, from });
+    const cleanTo = to.replace(/[^0-9+]/g, "");
+    const cleanFrom = from.replace(/[^0-9+]/g, "");
+    const formattedTo = cleanTo.startsWith("+") ? cleanTo : `+${cleanTo}`;
+    const formattedFrom = cleanFrom.startsWith("+") ? cleanFrom : `+${cleanFrom}`;
+    const message = await client.messages.create({ body, to: formattedTo, from: formattedFrom });
     return {
       sid: message.sid,
       channel: "SMS",
-      to,
+      to: formattedTo,
       status: "SENT",
     };
   } catch (err: unknown) {
@@ -210,12 +214,12 @@ export async function sendTwilioWhatsApp(
       body = bodyOrVariables;
     } else if (bodyOrVariables && typeof bodyOrVariables === "object") {
       contentVariables = JSON.stringify(bodyOrVariables);
+      contentSid = process.env.TWILIO_CONTENT_SID;
     }
-    contentSid = process.env.TWILIO_CONTENT_SID;
   } else {
     to = optionsOrTo.to;
     body = optionsOrTo.body;
-    contentSid = optionsOrTo.contentSid || process.env.TWILIO_CONTENT_SID;
+    contentSid = optionsOrTo.contentSid;
     if (typeof optionsOrTo.contentVariables === "string") {
       contentVariables = optionsOrTo.contentVariables;
     } else if (optionsOrTo.contentVariables && typeof optionsOrTo.contentVariables === "object") {
@@ -226,13 +230,16 @@ export async function sendTwilioWhatsApp(
     }
   }
 
+  // Only fallback to TWILIO_CONTENT_SID if no body is provided and caller did not specify
+  if (!body && !contentSid && process.env.TWILIO_CONTENT_SID) {
+    contentSid = process.env.TWILIO_CONTENT_SID;
+  }
+
   from = from || process.env.TWILIO_WHATSAPP_FROM || "whatsapp:+14155238886";
-  if (!from.startsWith("whatsapp:")) {
-    from = `whatsapp:${from}`;
-  }
-  if (!to.startsWith("whatsapp:")) {
-    to = `whatsapp:${to}`;
-  }
+  const cleanTo = to.replace(/whatsapp:/i, "").replace(/[^0-9+]/g, "");
+  const cleanFrom = from.replace(/whatsapp:/i, "").replace(/[^0-9+]/g, "");
+  to = `whatsapp:${cleanTo.startsWith("+") ? cleanTo : `+${cleanTo}`}`;
+  from = `whatsapp:${cleanFrom.startsWith("+") ? cleanFrom : `+${cleanFrom}`}`;
 
   if (customTwilioClient) {
     const createOpts: any = { to, from };

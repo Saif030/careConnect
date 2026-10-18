@@ -287,6 +287,8 @@ export function analyzeDrugInteractions(
       timestamp: new Date().toISOString(),
       severity: "RED",
       type: "COMPOUND",
+      triage_level: "P1",
+      triage_category: "DDI",
       message: `CRITICAL DRUG INTERACTION: ${topCritical.caregiver_warning}`,
       instructions: [
         "Do NOT administer the interacting medications together.",

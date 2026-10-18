@@ -23,15 +23,6 @@ export interface Medication {
   safety_notes?: string[];
 }
 
-export interface Alert {
-  event_id: string;
-  patient_id: string;
-  timestamp: string;
-  severity: AlertSeverity;
-  type: AlertType;
-  message: string;
-  instructions: string[];
-  contributing_signals: string[];
 export interface Interaction {
   drugs?: string[];
   mechanism?: string;
@@ -72,9 +63,50 @@ export interface Alert {
   medications?: Medication[] | string[];
   acknowledged?: boolean;
   acknowledged_at?: string;
-  feedback?: "False alarm" | "Real problem";
+  feedback?: "false_alarm" | "real_problem";
   feedback_at?: string;
   silent?: boolean;
   dashboard_card_only?: boolean;
+  triage_category?: "VITALS" | "COMPOUND" | "DDI" | "CONTRAINDICATION" | "ANOMALY";
+  triage_level?: "P1" | "P2" | "P3" | "P4";
+  resolved?: boolean;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_note?: string;
+  resolution_action?: string;
 }
 
+export interface Patient {
+  id: string;
+  name: string;
+  age: number;
+  gender: string;
+  room: string;
+  bed: string;
+  conditions: string[];
+  attendingPhysician: string;
+  baseline: {
+    heartRate: number;
+    spo2: number;
+    systolicBp: number;
+    diastolicBp: number;
+  };
+}
+
+export interface DemoScenario {
+  id: string;
+  title: string;
+  subtitle: string;
+  severity: AlertSeverity;
+  vitals: Omit<VitalsPacket, "patient_id" | "timestamp">;
+  clinicalNote: string;
+}
+
+export interface ChartPoint {
+  timestamp: string;
+  timeLabel: string;
+  heart_rate: number;
+  spo2: number;
+  systolic_bp: number;
+  diastolic_bp: number;
+}

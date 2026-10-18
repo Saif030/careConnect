@@ -20,10 +20,27 @@ export function evaluateVitals(packet: VitalsPacket): Alert {
   let severity: Alert["severity"] = "GREEN";
   let message = "Vitals within expected range.";
   const instructions: string[] = ["Continue routine monitoring."];
+  let triage_level: "P1" | "P2" | "P3" | "P4" = "P4";
+  let triage_category: "VITALS" | "COMPOUND" | "DDI" | "CONTRAINDICATION" | "ANOMALY" = "VITALS";
 
-  if (contributing_signals.includes("spo2") || packet.heart_rate > 130 || packet.systolic_bp < 80) {
+  if (contributing_signals.includes("spo2") || packet.heart_rate > 130 || packet.systolic_bp < 80 || packet.systolic_bp > 180 || packet.heart_rate < 48) {
     severity = "RED";
-    message = "Critical vital sign deviation detected.";
+    triage_level = "P1";
+
+    if (packet.spo2 < 90) {
+      message = `Acute Hypoxemia: Peripheral SpO2 acutely depressed at ${packet.spo2}%. Respiratory triage required.`;
+    } else if (packet.heart_rate < 50) {
+      message = `Profound Bradycardia: Heart rate critically depressed at ${packet.heart_rate} bpm.`;
+    } else if (packet.heart_rate > 130) {
+      message = `Extreme Tachycardia: Heart rate surging at ${packet.heart_rate} bpm. Critical cardiac strain.`;
+    } else if (packet.systolic_bp < 80) {
+      message = `Severe Hypotensive Shock: Blood pressure critically low at ${packet.systolic_bp}/${packet.diastolic_bp} mmHg.`;
+    } else if (packet.systolic_bp > 180) {
+      message = `Hypertensive Emergency: Severe blood pressure elevation (${packet.systolic_bp}/${packet.diastolic_bp} mmHg). Risk of end-organ compromise.`;
+    } else {
+      message = "Critical vital sign deviation detected. Immediate clinical intervention indicated.";
+    }
+
     instructions.splice(
       0,
       instructions.length,
@@ -33,7 +50,8 @@ export function evaluateVitals(packet: VitalsPacket): Alert {
     );
   } else if (contributing_signals.length > 0) {
     severity = "YELLOW";
-    message = "One or more vital signs are outside the resting range.";
+    triage_level = "P2";
+    message = `Borderline Vital Sign Deviation: ${contributing_signals.map(s => s.replace("_", " ").toUpperCase()).join(", ")} outside resting range.`;
     instructions.splice(
       0,
       instructions.length,
@@ -48,6 +66,8 @@ export function evaluateVitals(packet: VitalsPacket): Alert {
     timestamp: new Date().toISOString(),
     severity,
     type: "VITALS",
+    triage_level,
+    triage_category,
     message,
     instructions,
     contributing_signals,

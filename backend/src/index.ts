@@ -258,11 +258,37 @@ app.post(["/vitals", "/api/vitals"], async (req: AuthenticatedRequest, res) => {
 
   const fusionResult = fusionEngine.processVitals(packet);
   const alert = fusionResult.alert ?? evaluateVitals(packet);
-  alerts.push(alert);
-  await saveAlert(alert);
+
+  // Deduplication: Check if an active (unresolved) alert with the same patient and message already exists
+  const existingActive = alerts.find(
+    (a) => !a.resolved && a.patient_id === alert.patient_id && a.message === alert.message,
+  );
+
+  // Check if a normal/silent interaction alert was already resolved for this patient
+  const wasAlreadyResolved = alerts.find(
+    (a) =>
+      a.resolved &&
+      a.patient_id === alert.patient_id &&
+      a.message === alert.message &&
+      (fusionResult.is_silent || alert.severity === "GREEN"),
+  );
+
+  let finalAlert = alert;
+  if (existingActive) {
+    // Preserve identical event_id so active queue does not rapidly churn or shift items
+    existingActive.timestamp = alert.timestamp;
+    if (alert.contributing_signals) existingActive.contributing_signals = alert.contributing_signals;
+    if (alert.explanation) existingActive.explanation = alert.explanation;
+    await saveAlert(existingActive);
+    finalAlert = existingActive;
+    io.emit("alert:updated", existingActive);
+  } else if (!wasAlreadyResolved) {
+    alerts.push(alert);
+    await saveAlert(alert);
+  }
 
   io.emit("vitals", packet);
-  io.emit("alert", alert);
+  io.emit("alert", finalAlert);
   if (fusionResult.dashboard_card) {
     io.emit("dashboard:card", fusionResult.dashboard_card);
   }
@@ -376,20 +402,27 @@ app.post(["/alerts/:id/ack", "/api/alerts/:id/ack"], authenticateToken, async (r
   });
 });
 
-// Feedback on alert ("False alarm" / "Real problem")
+// Feedback on alert ("False alarm" / "Real problem" or "false_alarm" / "real_problem")
 app.post(["/alerts/:id/feedback", "/api/alerts/:id/feedback"], authenticateToken, async (req: AuthenticatedRequest, res) => {
   const eventId = String(req.params.id);
-  const feedback = req.body?.feedback;
+  const rawFeedback = req.body?.feedback;
 
-  if (feedback !== "False alarm" && feedback !== "Real problem") {
-    res.status(400).json({ error: "Feedback must be 'False alarm' or 'Real problem'" });
+  const normalizedFeedback =
+    rawFeedback === "False alarm" || rawFeedback === "false_alarm"
+      ? "False alarm"
+      : rawFeedback === "Real problem" || rawFeedback === "real_problem"
+      ? "Real problem"
+      : null;
+
+  if (!normalizedFeedback) {
+    res.status(400).json({ error: "Feedback must be 'False alarm' / 'false_alarm' or 'Real problem' / 'real_problem'" });
     return;
   }
 
   const alert = alerts.find((a) => a.event_id === eventId);
   const now = new Date().toISOString();
   if (alert) {
-    alert.feedback = feedback;
+    alert.feedback = normalizedFeedback;
     alert.feedback_at = now;
     await saveAlert(alert);
     io.emit("alert:feedback", {
@@ -406,10 +439,61 @@ app.post(["/alerts/:id/feedback", "/api/alerts/:id/feedback"], authenticateToken
     action: "ALERT_FEEDBACK_RECORDED",
     resource: req.path,
     patient_id: alert?.patient_id,
-    details: { event_id: eventId, feedback },
+    details: { event_id: eventId, feedback: normalizedFeedback },
   }).catch(() => {});
 
   res.json({ ok: true, alert, disclaimer: DISCLAIMER });
+});
+
+// Resolve triage alert with action, notes, and clinician signature
+app.post(["/alerts/:id/resolve", "/api/alerts/:id/resolve"], authenticateToken, async (req: AuthenticatedRequest, res) => {
+  const eventId = String(req.params.id);
+  const { action, note, clinician } = req.body ?? {};
+
+  // Stop escalation timer if active
+  if (escalationTimers.has(eventId)) {
+    clearTimeout(escalationTimers.get(eventId)!);
+    escalationTimers.delete(eventId);
+    console.log(`[ESCALATION RESOLVED] Escalation timer stopped for alert ${eventId}`);
+  }
+
+  const alert = alerts.find((a) => a.event_id === eventId);
+  const now = new Date().toISOString();
+  if (alert) {
+    alert.resolved = true;
+    alert.resolved_at = now;
+    alert.resolved_by = clinician || req.user?.username || "Clinician";
+    alert.resolution_action = action || "Clinical Review & Resolution Protocol Completed";
+    alert.resolution_note = note || "";
+    alert.acknowledged = true;
+    if (!alert.acknowledged_at) alert.acknowledged_at = now;
+
+    await saveAlert(alert);
+    io.emit("alert:resolved", {
+      event_id: alert.event_id,
+      resolved: true,
+      resolved_at: alert.resolved_at,
+      resolved_by: alert.resolved_by,
+      resolution_action: alert.resolution_action,
+      resolution_note: alert.resolution_note,
+    });
+    io.emit("alert:updated", alert);
+  }
+
+  recordDataAccessAudit({
+    user_id: req.user?.id,
+    role: req.user?.role,
+    action: "ALERT_RESOLVED",
+    resource: req.path,
+    patient_id: alert?.patient_id,
+    details: { event_id: eventId, action, clinician },
+  }).catch(() => {});
+
+  res.json({
+    ok: true,
+    alert: alert ?? { event_id: eventId, resolved: true, resolved_at: now },
+    disclaimer: DISCLAIMER,
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -634,6 +718,14 @@ const scenarioHandler = async (req: express.Request, res: express.Response) => {
   io.emit("vitals", packet);
   io.emit("alert", alert);
   handleCriticalAlert(alert);
+
+  // Trigger escalation workflow for RED alerts
+  if (alert.severity === "RED") {
+    handleAlertEscalation(alert, {
+      vitals: packet,
+      medications: medications.get(patient_id),
+    }).catch((err) => console.error("[Escalation] Error handling alert:", err));
+  }
 
   res.json({ ok: true, scenario, packet, alert, disclaimer: DISCLAIMER });
 };

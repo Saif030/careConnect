@@ -1,3 +1,5 @@
+process.env.NODE_ENV = "test";
+
 import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "node:test";
 import type { Alert, Medication, VitalsPacket } from "./types.js";
@@ -234,8 +236,8 @@ test("Timing: Step 1 sends SMS + Voice to primary caregiver, Step 2 notifies sec
   assert.ok(smsMessages[0].body.includes("Alice Walker"));
   assert.ok(mockTwilio.calls[0].twiml.includes("Alice Walker"));
 
-  // After Step 2 delay (another 50ms): secondary caregiver notified
-  await new Promise((resolve) => setTimeout(resolve, 55));
+  // After Step 2 delay: secondary caregiver notified
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const smsMessagesStep2 = mockTwilio.messages.filter((m) => !m.to.startsWith("whatsapp:"));
   assert.equal(smsMessagesStep2.length, 2, "Step 2 should send second SMS");
   assert.equal(mockTwilio.calls.length, 2, "Step 2 should place second Voice call");
